@@ -50,11 +50,12 @@ public:
     ~Acceptor();
 
     // [thread-safe] Accept connections from `listened_fd' and `listened_rdma'.
-    // Ownership of `listened_fd' and `listened_rdma' is also transferred to
-    // `Acceptor'. Can be called multiple times if the last `StartAccept' has
-    // been completely stopped by calling `StopAccept' and `Join'. Connections
-    // that has no data transmission for `idle_timeout_sec' will be closed
-    // automatically iff `idle_timeout_sec' > 0
+    // Ownership of `listened_fd' and `listened_rdma' is also transferred to 
+    // `Acceptor'.
+    // Can be called multiple times if the last `StartAccept' has been completely stopped
+    // by calling `StopAccept' and `Join'. Connections that has no data
+    // transmission for `idle_timeout_sec' will be closed automatically iff
+    // `idle_timeout_sec' > 0
     // Return 0 on success, -1 otherwise.
     int StartAccept(int listened_fd,
                     rdma::RdmaCommunicationManager* listened_rdma,
