@@ -31,13 +31,6 @@
 #include "butil/iobuf.h"
 
 namespace butil {
-#ifdef IOBUF_HUGE_BLOCK
-const size_t IOBuf::DEFAULT_PAYLOAD = IOBuf::DEFAULT_BLOCK_SIZE - 40;
-const size_t IOBuf::MAX_PAYLOAD = IOBuf::MAX_BLOCK_SIZE - 40;
-#else
-const size_t IOBuf::DEFAULT_PAYLOAD = IOBuf::DEFAULT_BLOCK_SIZE - 16;
-const size_t IOBuf::MAX_PAYLOAD = IOBuf::MAX_BLOCK_SIZE - 16;
-#endif
 namespace iobuf {
 
 typedef ssize_t (*iov_function)(int fd, const struct iovec *vector,
