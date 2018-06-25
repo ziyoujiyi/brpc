@@ -53,11 +53,19 @@ class IOBuf {
 friend class IOBufAsZeroCopyInputStream;
 friend class IOBufAsZeroCopyOutputStream;
 public:
+#ifdef IOBUF_HUGE_BLOCK
     static const size_t DEFAULT_BLOCK_SIZE = 8192;
-    static const size_t DEFAULT_PAYLOAD;
+    static const size_t DEFAULT_PAYLOAD = DEFAULT_BLOCK_SIZE - 40
     static const size_t MAX_BLOCK_SIZE = (1 << 16);
-    static const size_t MAX_PAYLOAD;
+    static const size_t MAX_PAYLOAD = MAX_BLOCK_SIZE - 40
     static const size_t INITIAL_CAP = 32; // must be power of 2
+#else
+    static const size_t DEFAULT_BLOCK_SIZE = 8192;
+    static const size_t DEFAULT_PAYLOAD = DEFAULT_BLOCK_SIZE - 16/*impl dependent*/;
+    static const size_t MAX_BLOCK_SIZE = (1 << 16);
+    static const size_t MAX_PAYLOAD = MAX_BLOCK_SIZE - 16/*impl dependent*/;
+    static const size_t INITIAL_CAP = 32; // must be power of 2
+#endif
 
     static const size_t MAX_HUGE_BLOCK_SIZE = (1UL << 32) - 1;
 
