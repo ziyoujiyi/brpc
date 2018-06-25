@@ -1088,7 +1088,8 @@ TEST_F(IOBufTest, extended_backup) {
         butil::iobuf::remove_tls_block_chain();
         butil::IOBuf src;
         const int BLKSIZE = (i == 0 ? 1024 : butil::IOBuf::DEFAULT_BLOCK_SIZE);
-        const int PLDSIZE = BLKSIZE - 16; // impl dependent.
+        const int HDRSIZE = butil::IOBuf::DEFAULT_BLOCK_SIZE - butil::IOBuf::DEFAULT_PAYLOAD;
+        const int PLDSIZE = BLKSIZE - HDRSIZE;
         butil::IOBufAsZeroCopyOutputStream out_stream1(&src, BLKSIZE);
         butil::IOBufAsZeroCopyOutputStream out_stream2(&src);
         butil::IOBufAsZeroCopyOutputStream & out_stream =
@@ -1217,6 +1218,7 @@ TEST_F(IOBufTest, backup_in_another_thread) {
 TEST_F(IOBufTest, own_block) {
     butil::IOBuf buf;
     const ssize_t BLOCK_SIZE = 1024;
+    const int HDRSIZE = butil::IOBuf::DEFAULT_BLOCK_SIZE - butil::IOBuf::DEFAULT_PAYLOAD;
     butil::IOBuf::Block *saved_tls_block = butil::iobuf::get_tls_block_head();
     butil::IOBufAsZeroCopyOutputStream wrapper(&buf, BLOCK_SIZE);
     int alloc_size = 0;
@@ -1232,7 +1234,7 @@ TEST_F(IOBufTest, own_block) {
     }
     ASSERT_EQ(static_cast<size_t>(alloc_size), buf.length());
     ASSERT_EQ(saved_tls_block, butil::iobuf::get_tls_block_head());
-    ASSERT_EQ(butil::iobuf::block_cap(buf._front_ref().block), BLOCK_SIZE - 16);
+    ASSERT_EQ(butil::iobuf::block_cap(buf._front_ref().block), BLOCK_SIZE - HDRSIZE);
 }
 
 struct Foo1 {
