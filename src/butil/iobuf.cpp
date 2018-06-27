@@ -32,7 +32,7 @@
 
 namespace butil {
 #ifdef IOBUF_HUGE_BLOCK
-const size_t IOBuf::DEFAULT_BLOCK_SIZE = 256 * 1024;
+const size_t IOBuf::DEFAULT_BLOCK_SIZE = 1024 * 1024;
 const size_t IOBuf::MAX_BLOCK_SIZE = 1024 * 1024;
 const size_t IOBuf::DEFAULT_PAYLOAD = IOBuf::DEFAULT_BLOCK_SIZE - 40;
 const size_t IOBuf::MAX_PAYLOAD = IOBuf::MAX_BLOCK_SIZE - 40;
