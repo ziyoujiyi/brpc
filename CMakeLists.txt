@@ -154,7 +154,7 @@ if(BRPC_WITH_RDMA)
     set(RDMA_DYNAMIC_LIB
         ibverbs
         rdmacm
-        nl-3  # Some versions of OFED may require this lib
+        #nl-3  # Some versions of OFED may require this lib
         )
 endif()
 
