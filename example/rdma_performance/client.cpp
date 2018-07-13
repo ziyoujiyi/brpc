@@ -18,8 +18,8 @@
 #include <unistd.h>
 #include <vector>
 #include <butil/atomicops.h>
+#include <butil/fast_rand.h>
 #include <butil/logging.h>
-#include <butil/rand_util.h>
 #include <brpc/channel.h>
 #include <brpc/rdma/rdma_helper.h>
 #include <bthread/bthread.h>
@@ -33,7 +33,7 @@ DEFINE_int32(attachment_size, -1, "Attachment size is used (in KB)");
 DEFINE_bool(specify_attachment_addr, false, "Specify the address of attachment");
 DEFINE_bool(echo_attachment, false, "Select whether attachment should be echo");
 DEFINE_string(protocol, "baidu_std", "Protocol type.");
-DEFINE_string(server, "0.0.0.0:8002", "IP Address of server");
+DEFINE_string(servers, "0.0.0.0:8002", "IP Address of server");
 DEFINE_bool(use_rdma, true, "Use RDMA or not");
 DEFINE_int32(rpc_timeout_ms, -1, "RPC call timeout");
 DEFINE_int32(test_seconds, 20, "Test running time");
@@ -42,33 +42,44 @@ DEFINE_int32(test_iterations, 0, "Test iterations");
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_cpu_recorder("server_cpu");
 butil::atomic<uint64_t> g_total_bytes;
+std::vector<std::string> g_servers;
 
 class PerformanceTest {
 public:
     PerformanceTest(int attachment_size, bool echo_attachment)
-        : _addr(NULL) {
+        : _addr(NULL)
+        , _channel(NULL)
+        , _cntl(NULL)
+        , _response(NULL)
+        , _start_time(0)
+        , _iterations(0)
+        , _stop(false)
+    {
         if (attachment_size == 0) {
             attachment_size = 1;
         } else {
             attachment_size *= 1024;
         }
+
+        _addr = malloc(attachment_size);
+        butil::fast_rand_bytes(_addr, attachment_size);
         if (FLAGS_specify_attachment_addr) {
-            _addr = malloc(attachment_size);
-            butil::RandBytes(_addr, attachment_size);
             brpc::rdma::RegisterMemoryForRdma(_addr, attachment_size);
             _attachment.append_zerocopy(_addr, attachment_size, NULL);
         } else {
-            std::string att = butil::RandBytesAsString(attachment_size);
-            _attachment.append(att);
+            _attachment.append(_addr, attachment_size);
         }
         _echo_attachment = echo_attachment;
     }
 
     ~PerformanceTest() {
         if (_addr) {
-            brpc::rdma::DeregisterMemoryForRdma(_addr);
+            if (FLAGS_specify_attachment_addr) {
+                brpc::rdma::DeregisterMemoryForRdma(_addr);
+            }
             free(_addr);
         }
+        delete _channel;
     }
 
     int Init() {
@@ -78,11 +89,13 @@ public:
         options.connection_type = "pooled";
         options.timeout_ms = FLAGS_rpc_timeout_ms;
         options.max_retry = 0;
-        if (_channel.Init(FLAGS_server.c_str(), &options) != 0) {
+        std::string server = g_servers[butil::fast_rand() % g_servers.size()];
+        _channel = new brpc::Channel();
+        if (_channel->Init(server.c_str(), &options) != 0) {
             LOG(ERROR) << "Fail to initialize channel";
             return -1;
         }
-        test::PerfTestService_Stub stub(&_channel);
+        test::PerfTestService_Stub stub(_channel);
         brpc::Controller cntl;
         test::PerfTestResponse response;
         test::PerfTestRequest request;
@@ -96,52 +109,73 @@ public:
         return 0;
     }
 
-    static void* RunTest(void* arg) {
-        PerformanceTest* test = (PerformanceTest*)arg;
-        test::PerfTestService_Stub stub(&test->_channel);
-        uint64_t start_time = butil::gettimeofday_us();
-        uint32_t iterations = FLAGS_test_iterations;
-        while (true) {
-            brpc::Controller cntl;
-            test::PerfTestResponse response;
-            test::PerfTestRequest request;
+    void SendRequest() {
+        test::PerfTestRequest request;
+        _response = new test::PerfTestResponse();
+        _cntl = new brpc::Controller();
+        request.set_echo_attachment(_echo_attachment);
+        _cntl->request_attachment().append(_attachment);
+        google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, this);
+        test::PerfTestService_Stub stub(_channel);
+        stub.Test(_cntl, &request, _response, done);
+    }
 
-            request.set_echo_attachment(test->_echo_attachment);
-            cntl.request_attachment().append(test->_attachment);
-            stub.Test(&cntl, &request, &response, NULL);
-
-            if (cntl.Failed()) {
-                LOG(ERROR) << "RPC call failed: " << cntl.ErrorText();
-                break;
-            }
-
-            if (FLAGS_echo_attachment) {
-                CHECK(test->_attachment == cntl.response_attachment());
-            }
-
-            g_latency_recorder << cntl.latency_us();
-            if (response.cpu_usage().size() > 0) {
-                g_cpu_recorder << atof(response.cpu_usage().c_str()) * 100;
-            }
-            g_total_bytes.fetch_add(test->_attachment.size(),
-                                    butil::memory_order_relaxed);
-            if (iterations == 0 && FLAGS_test_iterations > 0) {
-                break;
-            }
-            --iterations;
-            if (butil::gettimeofday_us() - start_time > FLAGS_test_seconds * 1000000u) {
-                break;
-            }
+    static void HandleResponse(PerformanceTest* test) {
+        std::unique_ptr<brpc::Controller> cntl_guard(test->_cntl);
+        std::unique_ptr<test::PerfTestResponse> response_guard(test->_response);
+        if (test->_cntl->Failed()) {
+            LOG(ERROR) << "RPC call failed: " << test->_cntl->ErrorText();
+            test->_stop = true;
+            return;
         }
 
+        if (FLAGS_echo_attachment) {
+            CHECK(test->_attachment == test->_cntl->response_attachment());
+        }
+        g_latency_recorder << test->_cntl->latency_us();
+        if (test->_response->cpu_usage().size() > 0) {
+            g_cpu_recorder << atof(test->_response->cpu_usage().c_str()) * 100;
+        }
+        g_total_bytes.fetch_add(test->_attachment.size(),
+                butil::memory_order_relaxed);
+
+        cntl_guard.reset(NULL);
+        response_guard.reset(NULL);
+
+        if (test->_iterations == 0 && FLAGS_test_iterations > 0) {
+            test->_stop = true;
+            return;
+        }
+        --test->_iterations;
+        if (butil::gettimeofday_us() - test->_start_time > FLAGS_test_seconds * 1000000u) {
+            test->_stop = true;
+            return;
+        }
+        test->SendRequest();
+    }
+
+    static void* RunTest(void* arg) {
+        PerformanceTest* test = (PerformanceTest*)arg;
+        test->_start_time = butil::gettimeofday_us();
+        test->_iterations = FLAGS_test_iterations;
+        
+        test->SendRequest();
+
+        while (!test->_stop) {
+        }
         return NULL;
     }
 
 private:
     void* _addr;
+    brpc::Channel* _channel;
+    brpc::Controller* _cntl;
+    test::PerfTestResponse* _response;
+    uint64_t _start_time;
+    uint32_t _iterations;
+    volatile bool _stop;
     butil::IOBuf _attachment;
     bool _echo_attachment;
-    brpc::Channel _channel;
 };
 
 void Test(int thread_num, int attachment_size) {
@@ -192,6 +226,15 @@ int main(int argc, char* argv[]) {
     }
 
     bthread_setconcurrency(sysconf(_SC_NPROCESSORS_ONLN));
+
+    std::string::size_type pos1 = 0;
+    std::string::size_type pos2 = FLAGS_servers.find('+');
+    while (pos2 != std::string::npos) {
+        g_servers.push_back(FLAGS_servers.substr(pos1, pos2 - pos1));
+        pos1 = pos2 + 1;
+        pos2 = FLAGS_servers.find('+', pos1);
+    }
+    g_servers.push_back(FLAGS_servers.substr(pos1));
 
     if (FLAGS_thread_num > 0 && FLAGS_attachment_size >= 0) {
         Test(FLAGS_thread_num, FLAGS_attachment_size);

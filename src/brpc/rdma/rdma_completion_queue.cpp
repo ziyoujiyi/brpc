@@ -19,10 +19,11 @@
 #endif
 #include <pthread.h>
 #include <unistd.h>
+#include <butil/atomicops.h>                         // atomic
+#include <butil/fast_rand.h>                         // fast_rand
 #include <butil/fd_utility.h>                        // make_non_blocking
 #include <butil/logging.h>                           // LOG
 #include <butil/object_pool.h>                       // butil::get_object
-#include <butil/rand_util.h>                         // butil::RandGenerator
 #include <bthread/execution_queue.h>
 #include <gflags/gflags.h>
 #include "brpc/input_messenger.h"
@@ -53,8 +54,10 @@ static const size_t CORE_NUM = (size_t)sysconf(_SC_NPROCESSORS_ONLN);
 int g_cq_num = 0;
 static bool g_use_polling = false;
 static bool g_bind_cpu = false;
-static RdmaCompletionQueue* g_cq = NULL;
+static RdmaCompletionQueue* g_cqs = NULL;
 static RdmaCQAssignPolicy* g_cq_policy = NULL;
+
+static butil::atomic<uint32_t> g_active_conn_num(0);
 
 RdmaCompletionQueue::RdmaCompletionQueue()
     : _cq(NULL)
@@ -75,7 +78,7 @@ RdmaCompletionQueue::~RdmaCompletionQueue() {
     CleanUp();
 }
 
-bool RdmaCompletionQueue::IsShared() const {
+bool RdmaCompletionQueue::IsShared() {
     return g_cq_num > 0;
 }
 
@@ -83,35 +86,35 @@ void* RdmaCompletionQueue::GetCQ() const {
     return _cq;
 }
 
-RdmaCompletionQueue* RdmaCompletionQueue::GetOne(Socket* s, int cq_size) {
-#ifndef BRPC_RDMA
-    CHECK(false) << "This should not happen";
-    return NULL;
-#else
-    int index = g_cq_policy->Assign();
+RdmaCompletionQueue* RdmaCompletionQueue::NewOne(Socket* s, int cq_size) {
+    CHECK(g_cq_policy != NULL);
+    CHECK(g_cq_num == 0);
 
-    if (g_cq_num == 0) {
-        RdmaCompletionQueue* rcq = new (std::nothrow) RdmaCompletionQueue;
-        if (!rcq) {
-            PLOG(ERROR) << "Fail to construct RdmaCompletionQueue";
-            return NULL;
-        }
-
-        rcq->_cq_size = FLAGS_rdma_cq_size < cq_size ?
-                        FLAGS_rdma_cq_size : cq_size;
-        rcq->_keytable_pool = s->_keytable_pool;
-        if (rcq->Init(index) < 0) {
-            PLOG(ERROR) << "Fail to intialize RdmaCompletionQueue";
-            delete rcq;
-            return NULL;
-        }
-
-        rcq->_ep_sid = s->id();
-        return rcq;
-    } else {
-        return &g_cq[index];
+    RdmaCompletionQueue* rcq = new (std::nothrow) RdmaCompletionQueue;
+    if (!rcq) {
+        PLOG(ERROR) << "Fail to construct RdmaCompletionQueue";
+        return NULL;
     }
-#endif
+
+    rcq->_cq_size = FLAGS_rdma_cq_size < cq_size ?
+        FLAGS_rdma_cq_size : cq_size;
+    rcq->_keytable_pool = s->_keytable_pool;
+    if (rcq->Init(g_cq_policy->Assign()) < 0) {
+        PLOG(ERROR) << "Fail to intialize RdmaCompletionQueue";
+        delete rcq;
+        return NULL;
+    }
+
+    g_active_conn_num.fetch_add(1, butil::memory_order_relaxed);
+    rcq->_ep_sid = s->id();
+    return rcq;
+}
+
+RdmaCompletionQueue* RdmaCompletionQueue::GetOne() {
+    CHECK(g_cq_policy != NULL);
+    CHECK(g_cq_num > 0);
+    g_active_conn_num.fetch_add(1, butil::memory_order_relaxed);
+    return &g_cqs[g_cq_policy->Assign()];
 }
 
 int RdmaCompletionQueue::Init(int cpu) {
@@ -163,6 +166,10 @@ int RdmaCompletionQueue::Init(int cpu) {
         }
     } else {
         CHECK(_tid == 0);
+        // When we use polling mode, we select several thread workers to do
+        // the polling all the time. These thread workers will not handle other
+        // tasks any more. Using BTHREAD_ATTR_PTHREAD to avoid allocate stacks
+        // in bthread for them.
         if (bthread_start_background(&_tid, &BTHREAD_ATTR_PTHREAD,
                                      PollThis, this) < 0) {
             return -1;
@@ -210,6 +217,7 @@ void RdmaCompletionQueue::CleanUp() {
 
 void RdmaCompletionQueue::Release() {
     g_cq_policy->Return(_cpu_index);
+    g_active_conn_num.fetch_sub(1, butil::memory_order_relaxed);
 }
 
 int RdmaCompletionQueue::GetAndAckEvents() {
@@ -254,6 +262,33 @@ static inline void CQError() {
                << "Application exit.";
     exit(1);
 }
+
+#ifdef BRPC_RDMA
+static void ParseRdmaCompletion(ibv_wc& wc, RdmaCompletion* rc) {
+    switch (wc.opcode) {
+    case IBV_WC_SEND: {
+        rc->type = RDMA_EVENT_SEND;
+        break;
+    }
+    case IBV_WC_RECV: {
+        rc->type = RDMA_EVENT_RECV;
+        break;
+    }
+    case IBV_WC_RECV_RDMA_WITH_IMM: {
+        rc->type = RDMA_EVENT_RECV_WITH_IMM;
+        break;
+    }
+    case IBV_WC_RDMA_WRITE: {
+        rc->type = RDMA_EVENT_WRITE;
+        break;
+    }
+    default:
+        rc->type = RDMA_EVENT_ERROR;
+    }
+    rc->len = wc.byte_len;
+    rc->imm = ntohl(wc.imm_data);
+}
+#endif
 
 void* RdmaCompletionQueue::PollThis(void* arg) {
     RdmaCompletionQueue* rcq = (RdmaCompletionQueue*)arg;
@@ -342,8 +377,6 @@ void RdmaCompletionQueue::PollCQ(Socket* m) {
         }
         notified = false;
 
-        const int64_t received_us = butil::cpuwide_time_us();
-        const int64_t base_realtime = butil::gettimeofday_us() - received_us;
         for (int i = 0; i < cnt; ++i) {
             if (s == NULL || s->id() != wc[i].wr_id) {
                 s.reset(NULL);
@@ -358,38 +391,17 @@ void RdmaCompletionQueue::PollCQ(Socket* m) {
 
             if (wc[i].status != IBV_WC_SUCCESS) {
                 errno = ERDMA;
-                PLOG(WARNING) << "Fail to handle RDMA completion";
-                s->SetFailed(errno, "Fail to handle RDMA completion");
+                PLOG(WARNING) << "Fail to handle RDMA completion, error status("
+                              << wc[i].status << ")";
+                s->SetFailed(errno, "Fail to handle RDMA completion, error status: %d",
+                             wc[i].status);
                 continue;
             }
 
-            RdmaCompletion* rc = butil::get_object<RdmaCompletion>();
-            switch (wc[i].opcode) {
-            case IBV_WC_SEND: {
-                rc->type = RDMA_EVENT_SEND;
-                break;
-            }
-            case IBV_WC_RECV: {
-                rc->type = RDMA_EVENT_RECV;
-                break;
-            }
-            case IBV_WC_RECV_RDMA_WITH_IMM: {
-                rc->type = RDMA_EVENT_RECV_WITH_IMM;
-                break;
-            }
-            case IBV_WC_RDMA_WRITE: {
-                rc->type = RDMA_EVENT_WRITE;
-                break;
-            }
-            default:
-                rc->type = RDMA_EVENT_ERROR;
-            }
-            rc->len = wc[i].byte_len;
-            rc->imm = ntohl(wc[i].imm_data);
-
             if (g_cq_num == 0) {
-                ssize_t nr = s->_rdma_ep->HandleCompletion(*rc);
-                butil::return_object<RdmaCompletion>(rc);
+                RdmaCompletion rc;
+                ParseRdmaCompletion(wc[i], &rc);
+                ssize_t nr = s->_rdma_ep->HandleCompletion(rc);
                 if (nr < 0) {
                     PLOG(WARNING) << "Fail to handle RDMA completion";
                     s->SetFailed(errno, "Fail to handle RDMA completion");
@@ -399,13 +411,13 @@ void RdmaCompletionQueue::PollCQ(Socket* m) {
                     continue;
                 }
 
-                InputMessenger* messenger =
-                        static_cast<InputMessenger*>(s->user());
-                if (messenger->ProcessNewMessage(s.get(), nr, false,
-                            received_us, base_realtime, last_msg) < 0) {
+                InputMessenger* messenger = static_cast<InputMessenger*>(s->user());
+                if (messenger->ProcessReceivedData(s.get(), nr, false, last_msg) < 0) {
                     continue;
                 }
             } else {
+                RdmaCompletion* rc = butil::get_object<RdmaCompletion>();
+                ParseRdmaCompletion(wc[i], rc);
                 SocketUniquePtr tmp;
                 s->ReAddress(&tmp);
                 rc->socket = tmp.get();
@@ -440,7 +452,7 @@ RandomRdmaCQAssignPolicy::RandomRdmaCQAssignPolicy(uint32_t range)
 }
 
 uint32_t RandomRdmaCQAssignPolicy::Assign() {
-    return butil::RandGenerator(_range);
+    return butil::fast_rand() % _range;
 }
 
 void RandomRdmaCQAssignPolicy::Return(uint32_t) {
@@ -513,13 +525,13 @@ int GlobalCQInit() {
 
     uint32_t cq_assign_range = CORE_NUM;
     if (g_cq_num > 0) {
-        g_cq = new (std::nothrow) RdmaCompletionQueue[g_cq_num];
-        if (!g_cq) {
+        g_cqs = new (std::nothrow) RdmaCompletionQueue[g_cq_num];
+        if (!g_cqs) {
             PLOG(WARNING) << "Fail to malloc RdmaCompletionQueue";
             return -1;
         }
         for (int i = 0; i < g_cq_num; ++i) {
-            if (g_cq[i].Init((i + FLAGS_rdma_cq_offset) % CORE_NUM) < 0) {
+            if (g_cqs[i].Init((i + FLAGS_rdma_cq_offset) % CORE_NUM) < 0) {
                 PLOG(WARNING) << "Fail to initialize RdmaCompletionQueue";
                 return -1;
             }
@@ -533,12 +545,12 @@ int GlobalCQInit() {
     } else if (FLAGS_rdma_cq_assign_policy.compare("rr") == 0) {
         g_cq_policy = new (std::nothrow)
                       RoundRobinRdmaCQAssignPolicy(cq_assign_range);
-    } else if (FLAGS_rdma_cq_assign_policy.compare("least") == 0) {
+    } else if (FLAGS_rdma_cq_assign_policy.compare("least_used") == 0) {
         g_cq_policy = new (std::nothrow)
                       LeastUtilizedRdmaCQAssignPolicy(cq_assign_range);
     } else {
         LOG(WARNING) << "Incorrect RdmaCQAssignPolicy. Possible value:"
-                        " rr, random, least";
+                        " rr, random, least_used";
         return -1;
     }
 
@@ -552,9 +564,16 @@ int GlobalCQInit() {
 
 void GlobalCQRelease() {
     for (int i = 0; i < g_cq_num; ++i) {
-        g_cq[i].StopAndJoin();
+        g_cqs[i].StopAndJoin();
     }
-    // Do not release g_cq and g_cq_policy to avoid segmentation fault
+
+    // We must wait for all CQs released
+    while (g_active_conn_num.load(butil::memory_order_relaxed) > 0) {
+        usleep(10);
+    }
+
+    delete [] g_cqs;
+    delete g_cq_policy;
 }
 
 }  // namespace rdma
