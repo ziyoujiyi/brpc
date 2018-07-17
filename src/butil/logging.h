@@ -31,7 +31,6 @@
 #include "butil/time.h"      // gettimeofday_us()
 
 #if BRPC_WITH_GLOG
-#pragma message("with_log on")
 # include <glog/logging.h>
 # include <glog/raw_logging.h>
 // define macros that not implemented in glog
@@ -59,7 +58,6 @@
 
 #else
 
-#pragma message("with_log off")
 #ifdef BAIDU_INTERNAL
 // gejun: com_log.h includes ul_def.h, undef conflict macros
 // FIXME(gejun): We have to include com_log which is assumed to be included
