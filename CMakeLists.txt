@@ -189,6 +189,7 @@ set(DYNAMIC_LIB
 set(BRPC_PRIVATE_LIBS "-lgflags -lprotobuf -lleveldb -lprotoc -lssl -lcrypto -ldl -lz")
 
 if(WITH_GLOG)
+    message(STATUS "WITH_GLOG:" ${GLOG_LIB})
     set(DYNAMIC_LIB ${DYNAMIC_LIB} ${GLOG_LIB})
     set(BRPC_PRIVATE_LIBS "${BRPC_PRIVATE_LIBS} -lglog")
 endif()
