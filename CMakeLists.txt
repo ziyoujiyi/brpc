@@ -26,6 +26,9 @@ option(WITH_GLOG "With glog" OFF)
 option(DEBUG "Print debug logs" OFF)
 option(WITH_DEBUG_SYMBOLS "With debug symbols" ON)
 option(WITH_THRIFT "With thrift framed protocol supported" OFF)
+option(BRPC_WITH_THRIFT "With thrift framed protocol supported" OFF)
+option(BRPC_WITH_RDMA "Whether to build brpc with RDMA" OFF)
+option(IOBUF_WITH_HUGE_BLOCK "Whether to build iobuf with huge block" OFF)
 option(BUILD_UNIT_TESTS "Whether to build unit tests" OFF)
 
 set(WITH_GLOG_VAL "0")
@@ -150,6 +153,28 @@ include_directories(
         ${OPENSSL_INCLUDE_DIR}
         )
 
+if(BRPC_WITH_RDMA)
+    find_library(RDMACM NAMES rdmacm)
+    if(NOT RDMACM)
+        message(FATAL_ERROR "Fail to find rdmacm lib")
+    endif()
+    find_library(IBVERBS NAMES ibverbs)
+    if(NOT IBVERBS)
+        message(FATAL_ERROR "Fail to find ibverbs lib")
+    endif()
+    set(RDMA_DYNAMIC_LIB
+        ibverbs
+        rdmacm
+        )
+    find_library(NL NAMES nl)
+    if (NL)
+        set(RDMA_DYNAMIC_LIB
+            ${RDMA_DYNAMIC_LIB}
+            nl
+            )
+    endif()
+endif()
+
 set(DYNAMIC_LIB
     ${GFLAGS_LIBRARY}
     ${PROTOBUF_LIBRARIES}
@@ -160,6 +185,7 @@ set(DYNAMIC_LIB
     ${THRIFTNB_LIB}
     ${OPENSSL_LIBRARIES}
     ${OPENSSL_CRYPTO_LIBRARY}
+    ${RDMA_DYNAMIC_LIB}
     dl
     z
     )

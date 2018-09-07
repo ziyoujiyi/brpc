@@ -160,4 +160,16 @@ double fast_rand_double() {
     return fast_rand_double(&_tls_seed);
 }
 
+void fast_rand_bytes(void* addr, uint64_t len) {
+    uint64_t offset = 0;
+    while (offset < len) {
+        uint64_t rand_num = butil::fast_rand();
+        char* rand_str = (char*)(&rand_num);
+        uint64_t current_len = sizeof(uint64_t) < (len - offset) ?
+                               sizeof(uint64_t) : (len - offset);
+        memcpy((char*)addr + offset, rand_str, current_len);
+        offset += current_len;
+    }
+}
+
 }  // namespace butil
