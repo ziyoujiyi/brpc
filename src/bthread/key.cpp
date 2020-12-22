@@ -382,7 +382,7 @@ int bthread_key_create2(bthread_key_t* key,
     uint32_t index = 0;
     {
         BAIDU_SCOPED_LOCK(bthread::s_key_mutex);
-        std::cout << "free key: " << thread::nfreekey << " . and nkey:" <<  bthread::nkey<< std::endl;
+        std::cout << "free key: " << bthread::nfreekey << " . and nkey:" <<  bthread::nkey<< std::endl;
         if (bthread::nfreekey > 0) {
             index = bthread::s_free_keys[--bthread::nfreekey];
         } else if (bthread::nkey < bthread::KEYS_MAX) {
