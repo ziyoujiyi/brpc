@@ -1034,10 +1034,10 @@ int Server::StartInternal(const butil::ip_t& ip,
         http_port = _options.internal_port;
         server_info << " and internal_port=" << _options.internal_port;
     }
-    LOG(INFO) << server_info.str() << '.';
+    VLOG(3) << server_info.str() << '.';
 
     if (_options.has_builtin_services) {
-        LOG(INFO) << "Check out http://" << butil::my_hostname() << ':'
+        VLOG(3) << "Check out http://" << butil::my_hostname() << ':'
                   << http_port << " in web browser.";
     } else {
         LOG(WARNING) << "Builtin services are disabled according to "
@@ -1092,7 +1092,7 @@ int Server::Stop(int timeout_ms) {
     }
     _status = STOPPING;
     
-    LOG(INFO) << "Server[" << version() << "] is going to quit";
+    VLOG(3) << "Server[" << version() << "] is going to quit";
 
     if (_am) {
         _am->StopAccept(timeout_ms);
