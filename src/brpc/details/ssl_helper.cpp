@@ -130,10 +130,12 @@ static void SSLInfoCallback(const SSL* ssl, int where, int ret) {
 
     if (where & SSL_CB_HANDSHAKE_START) {
         if (s->ssl_state() == SSL_CONNECTED) {
+            /*
             // Disable renegotiation (CVE-2009-3555)
             LOG(ERROR) << "Close " << *s << " due to insecure "
                        << "renegotiation detected (CVE-2009-3555)";
             s->SetFailed();
+            */
         }
     }
 }
